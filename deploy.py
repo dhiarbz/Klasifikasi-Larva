@@ -2,8 +2,8 @@ import streamlit as st
 import numpy as np
 from PIL import Image
 import tensorflow as tf
-from keras.preprocessing import image
-from keras.models import load_model
+from tensorflow.keras.preprocessing import image
+from tensorflow.keras.models import load_model
 
 # Judul aplikasi
 st.title("Klasifikasi Larva BSF vs Lalat Hijau")
