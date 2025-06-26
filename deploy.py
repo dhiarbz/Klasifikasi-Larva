@@ -1,78 +1,62 @@
+# -*- coding: utf-8 -*-
+"""deploy.py"""
+
 import streamlit as st
 import numpy as np
-from PIL import Image
-import tensorflow as tf
-from tensorflow.keras.preprocessing import image
+import pandas as pd
+import cv2
+import os
 from tensorflow.keras.models import load_model
+from skimage.feature import graycomatrix, graycoprops
 
-# Judul aplikasi
-st.title("Klasifikasi Larva BSF vs Lalat Hijau")
-st.write("Unggah gambar larva untuk mengidentifikasi apakah itu larva Black Soldier Fly (BSF) atau larva lalat hijau")
+model = load_model('best_cnn_model.h5')
 
-# Load model yang sudah disimpan
-@st.cache_resource
-def load_my_model():
-    model = load_model('best_cnn_model.h5') 
-    return model
+label_map = {0: 'BSF', 1: 'HouseFly'}
 
-model = load_my_model()
+st.title('Klasifikasi Larva BSF vs Lalat Rumah')
 
-# Fungsi untuk memproses gambar dan melakukan prediksi
-def predict_larva(img, model):
-    # Resize gambar ke ukuran yang diharapkan model (misal 224x224)
-    img = img.resize((224, 224))
-    
-    # Konversi gambar ke array
-    img_array = image.img_to_array(img)
-    img_array = np.expand_dims(img_array, axis=0)
-    img_array = img_array / 255.0  # Normalisasi
-    
-    # Lakukan prediksi
-    prediction = model.predict(img_array)
-    
-    return prediction
+uploaded = st.file_uploader('Unggah gambar larva', type=['jpg', 'jpeg', 'png'])
 
-# Upload gambar
-uploaded_file = st.file_uploader("Pilih gambar larva...", type=["jpg", "jpeg", "png"])
+st.image(uploaded, caption='Gambar yang diunggah', use_column_width=True)
 
-if uploaded_file is not None:
-    # Tampilkan gambar yang diupload
-    image_display = Image.open(uploaded_file)
-    st.image(image_display, caption='Gambar Larva yang Diunggah', use_column_width=True)
-    
-    # Lakukan prediksi ketika tombol ditekan
-    if st.button('Identifikasi Larva'):
-        with st.spinner('Sedang memproses gambar...'):
-            # Proses gambar dan prediksi
-            prediction = predict_larva(image_display, model)
-            
-            # Ambil hasil prediksi
-            class_names = ['Larva BSF', 'Larva Lalat Hijau']  # Sesuaikan dengan urutan kelas di model Anda
-            predicted_class = class_names[np.argmax(prediction)]
-            confidence = np.max(prediction) * 100
-            
-            # Tampilkan hasil
-            st.success(f"Hasil Identifikasi: {predicted_class}")
-            st.write(f"Tingkat Kepercayaan: {confidence:.2f}%")
-            
-            # Tambahkan penjelasan
-            if predicted_class == "Larva BSF":
-                st.info("""
-                **Ciri-ciri Larva BSF:**
-                - Warna krem atau kecoklatan
-                - Bentuk tubuh meruncing di kedua ujung
-                - Ukuran lebih besar dan gemuk
-                - Bergerak aktif tapi tidak terlalu cepat
-                """)
-            else:
-                st.info("""
-                **Ciri-ciri Larva Lalat Hijau:**
-                - Warna putih atau kekuningan
-                - Tubuh lebih ramping dan panjang
-                - Bergerak sangat aktif
-                - Sering ditemukan pada bahan organik yang membusuk
-                """)
+img_bytes = np.asarray(bytearray(uploaded.read()), dtype=np.uint8)
+img = cv2.imdecode(img_bytes, cv2.IMREAD_COLOR)
+rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray)
+denoised = cv2.fastNlMeansDenoising(clahe, h=7, templateWindowSize=13)
+gaussian = cv2.GaussianBlur(denoised, (0, 0), 0.1)
+sharpened = cv2.addWeighted(denoised, 2.0, gaussian, -1.0, 0)
+thresh = cv2.adaptiveThreshold(sharpened, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 4)
 
-# Catatan kaki
-st.markdown("---")
-st.caption("Aplikasi ini menggunakan model deep learning untuk mengidentifikasi jenis larva. Pastikan gambar yang diunggah jelas dan fokus pada larva.")
+mask = np.zeros(sharpened.shape, np.uint8)
+mask[thresh == 255] = cv2.GC_PR_FGD
+mask[thresh == 0] = cv2.GC_PR_BGD
+bgdModel = np.zeros((1, 65), np.float64)
+fgdModel = np.zeros((1, 65), np.float64)
+cv2.grabCut(rgb, mask, None, bgdModel, fgdModel, 25, cv2.GC_INIT_WITH_MASK)
+final_mask = np.where((mask == cv2.GC_FGD) | (mask == cv2.GC_PR_FGD), 1, 0).astype('uint8')
+masked_img = sharpened * final_mask
+
+coords = np.argwhere(final_mask)
+x0, y0 = coords.min(axis=0)
+x1, y1 = coords.max(axis=0) + 1
+cropped = masked_img[x0:x1, y0:y1]
+
+glcm = graycomatrix(cropped, distances=[1], angles=[0, np.pi/4, np.pi/2, 3*np.pi/4], levels=256, symmetric=True, normed=True)
+features = [
+    graycoprops(glcm, 'contrast').mean(),
+    graycoprops(glcm, 'dissimilarity').mean(),
+    graycoprops(glcm, 'homogeneity').mean(),
+    graycoprops(glcm, 'energy').mean(),
+    graycoprops(glcm, 'correlation').mean(),
+    graycoprops(glcm, 'ASM').mean()
+]
+
+x_pred = np.array(features).reshape(1, 6, 1)
+
+if st.button('Prediksi'):
+    prediction = model.predict(x_pred)
+    predicted_index = np.argmax(prediction)
+    predicted_label = label_map[predicted_index]
+    st.success(f'Hasil Prediksi: {predicted_label}')
